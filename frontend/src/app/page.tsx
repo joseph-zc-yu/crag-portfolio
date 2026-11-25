@@ -2,6 +2,7 @@
 
 import dynamic from "next/dynamic";
 import { useState } from "react";
+import ReactMarkdown from "react-markdown";
 import { Search, Send, Upload, ExternalLink, FileText } from "lucide-react";
 import type { Citation } from "@/components/PdfViewer";
 
@@ -42,20 +43,39 @@ export default function Home() {
     if (!file) return;
     setPdfUrl(URL.createObjectURL(file));
     setPageNumber(1);
-    setMessages([]);
+    setSessionId(null);
     setActiveCitations([]);
+    setWebQueries([]);
+    setWebResults([]);
+    setMessages([
+      {
+        role: "assistant",
+        content: `Indexing **${file.name}**... (First upload may take ~40s while Render wakes the backend.)`,
+      },
+    ]);
 
     const formData = new FormData();
     formData.append("file", file);
     setLoading(true);
     try {
       const res = await fetch(`${API_BASE}/api/upload`, { method: "POST", body: formData });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.session_id) {
+        throw new Error(data.detail || `Upload failed (HTTP ${res.status})`);
+      }
       setSessionId(data.session_id);
       setMessages([
         {
           role: "assistant",
           content: `Indexed **${data.filename}** (${data.chunk_count} sections). Ask a question below!`,
+        },
+      ]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Network or CORS error.";
+      setMessages([
+        {
+          role: "assistant",
+          content: `Upload error: ${msg}\n(Backend URL: ${API_BASE})`,
         },
       ]);
     } finally {
@@ -78,7 +98,10 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ session_id: sessionId, query }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.detail || `Chat failed (HTTP ${res.status})`);
+      }
 
       const citations: Citation[] = data.citations || [];
       setActiveCitations(citations);
@@ -96,6 +119,12 @@ export default function Home() {
           web_queries: data.web_queries,
           web_results: data.web_results,
         },
+      ]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Request failed.";
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: `Error: ${msg}` },
       ]);
     } finally {
       setLoading(false);
@@ -149,7 +178,10 @@ export default function Home() {
                     : "Supplemented via Web Search"}
                 </span>
               )}
-              <p className="whitespace-pre-wrap">{m.content}</p>
+
+              <div className="space-y-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:leading-relaxed [&_strong]:font-semibold [&_ul]:list-disc [&_ul]:pl-5">
+                <ReactMarkdown>{m.content}</ReactMarkdown>
+              </div>
 
               {/* Clickable PDF Citation Chips */}
               {m.citations && m.citations.length > 0 && (
@@ -171,6 +203,12 @@ export default function Home() {
               )}
             </div>
           ))}
+
+          {loading && sessionId && (
+            <div className="mr-4 animate-pulse rounded-2xl border border-slate-200 bg-white p-3.5 text-sm text-slate-500">
+              Analyzing PDF sections &amp; grading relevance...
+            </div>
+          )}
         </div>
 
         <form onSubmit={handleSend} className="flex gap-2 border-t border-slate-200 bg-white p-3">
@@ -199,7 +237,7 @@ export default function Home() {
 
         {webQueries.length === 0 ? (
           <p className="text-xs text-slate-400">
-            When the PDF lacks sufficient info, DuckDuckGo search terms & sources appear here.
+            When the PDF lacks sufficient info, DuckDuckGo search terms &amp; sources appear here.
           </p>
         ) : (
           <>
@@ -229,12 +267,12 @@ export default function Home() {
                   className="block rounded-xl border border-slate-200 bg-white p-2.5 transition hover:border-slate-300"
                 >
                   <div className="flex items-start justify-between gap-1">
-                    <span className="text-xs font-semibold text-slate-800 line-clamp-2">
+                    <span className="line-clamp-2 text-xs font-semibold text-slate-800">
                       {w.title}
                     </span>
                     <ExternalLink className="h-3 w-3 shrink-0 text-slate-400" />
                   </div>
-                  <p className="mt-1 text-[11px] text-slate-500 line-clamp-3">{w.snippet}</p>
+                  <p className="mt-1 line-clamp-3 text-[11px] text-slate-500">{w.snippet}</p>
                 </a>
               ))}
             </div>

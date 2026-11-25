@@ -3,8 +3,8 @@ from dataclasses import dataclass, field
 import pymupdf
 
 HEADING_RE = re.compile(
-    r"^(chapter|section|article|part|\d+(\.\d+)*\.?)\s+[A-Z0-9].{1,80}$",
-    re.IGNORECASE,
+    r"^(?:(?:Chapter|CHAPTER|Section|SECTION|Article|ARTICLE|Part|PART)\s+[A-Z0-9].{1,80}"
+    r"|\d+(?:\.\d+)*\.\s+[A-Z][a-zA-Z].{1,80})$"
 )
 
 
@@ -18,7 +18,14 @@ class DocumentChunk:
     bboxes_by_page: dict[int, list[list[float]]] = field(default_factory=dict)
 
 
-def extract_section_chunks(pdf_bytes: bytes, max_chars: int = 1200) -> list[DocumentChunk]:
+def _is_jstor_cover_page(page: pymupdf.Page) -> bool:
+    txt = page.get_text("text").lower()
+    return "about.jstor.org/terms" in txt and (
+        "stable url:" in txt or "jstor is a not-for-profit" in txt
+    )
+
+
+def extract_section_chunks(pdf_bytes: bytes, max_chars: int = 1800) -> list[DocumentChunk]:
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     toc = doc.get_toc()  # [[level, title, page_num], ...]
     toc_by_page: dict[int, str] = {}
@@ -54,8 +61,11 @@ def extract_section_chunks(pdf_bytes: bytes, max_chars: int = 1200) -> list[Docu
         if pw == 0 or ph == 0:
             continue
 
+        # Skip JSTOR's Page 1 terms/cover sheet so it doesn't pollute chunks
+        if page_num == 1 and _is_jstor_cover_page(page):
+            continue
+
         if page_num in toc_by_page:
-            # Start a fresh section if TOC marks a new heading on this page
             if sum(len(t) for t in buf_text) > 150:
                 flush_buffer()
                 buf_primary_page = page_num
@@ -66,6 +76,11 @@ def extract_section_chunks(pdf_bytes: bytes, max_chars: int = 1200) -> list[Docu
             x0, y0, x1, y1, text, _, block_type = b
             if block_type != 0:  # text blocks only
                 continue
+
+            # Skip running headers, page numbers, and bottom JSTOR watermarks
+            if (y0 / ph) < 0.08 or (y1 / ph) > 0.92:
+                continue
+
             clean = " ".join(text.split())
             if not clean:
                 continue
@@ -77,7 +92,6 @@ def extract_section_chunks(pdf_bytes: bytes, max_chars: int = 1200) -> list[Docu
                 round(y1 / ph, 4),
             ]
 
-            # Detect structural headings (Chapter/Section/Article)
             if HEADING_RE.match(clean) and len(clean) < 100:
                 flush_buffer()
                 current_section = clean

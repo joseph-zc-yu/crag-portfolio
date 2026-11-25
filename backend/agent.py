@@ -7,7 +7,6 @@ from ddgs import DDGS
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
-from pdf_processor import DocumentChunk
 from vector_store import LightVectorStore
 
 
@@ -17,6 +16,9 @@ def get_llm() -> ChatOpenAI:
         api_key=os.getenv("ZAI_API_KEY"),
         base_url=os.getenv("ZAI_BASE_URL", "https://api.z.ai/api/paas/v4"),
         temperature=0.1,
+        max_tokens=1500,
+        timeout=45,
+        extra_body={"thinking": {"type": "disabled"}},
     )
 
 
@@ -24,7 +26,10 @@ def parse_json_safe(raw: str) -> dict[str, Any]:
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.MULTILINE)
     match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
     if match:
-        return json.loads(match.group(0))
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
     return {}
 
 
@@ -47,7 +52,7 @@ def build_crag_graph(store: LightVectorStore):
 
     # [1. Retrieve Node]
     def retrieve_node(state: CRAGState) -> dict[str, Any]:
-        hits = store.similarity_search(state["query"], top_k=4)
+        hits = store.similarity_search(state["query"], top_k=8)
         formatted = [
             {
                 "chunk_id": chunk.chunk_id,
@@ -59,6 +64,7 @@ def build_crag_graph(store: LightVectorStore):
             }
             for chunk, score in hits
         ]
+        print(f"[CRAG] retrieve_node -> {len(formatted)} chunks")
         return {"retrieved_chunks": formatted}
 
     # [2. Grade Node]
@@ -100,6 +106,7 @@ Respond ONLY in valid JSON:
         if relevance == "insufficient" and not web_queries:
             web_queries = [state["query"]]
 
+        print(f"[CRAG] grade_node -> relevance={relevance}, relevant_ids={relevant_ids}")
         return {
             "relevance": relevance,
             "relevant_chunk_ids": relevant_ids,
@@ -109,7 +116,7 @@ Respond ONLY in valid JSON:
     def route_after_grade(state: CRAGState) -> str:
         return "generate_node" if state["relevance"] == "high" else "web_search_fallback"
 
-    # [3. Generate Node] (High relevance path: prepare refined PDF context)
+    # [3. Generate Node]
     def generate_node(state: CRAGState) -> dict[str, Any]:
         selected = [
             c
@@ -128,8 +135,8 @@ Respond ONLY in valid JSON:
         seen_urls: set[str] = set()
         for q in state.get("web_queries", []):
             try:
-                with DDGS() as ddgs:
-                    hits = list(ddgs.text(q, max_results=3))
+                with DDGS(timeout=10) as ddgs:
+                    hits = list(ddgs.text(q, max_results=3, backend="duckduckgo,wikipedia"))
                 for h in hits:
                     url = h.get("href", "")
                     if url and url not in seen_urls:
@@ -144,15 +151,9 @@ Respond ONLY in valid JSON:
                             }
                         )
             except Exception as exc:
-                results.append(
-                    {
-                        "id": f"web_err_{len(results) + 1}",
-                        "query": q,
-                        "title": "Search Temporarily Rate-Limited",
-                        "url": "",
-                        "snippet": f"DuckDuckGo fallback note: {exc}",
-                    }
-                )
+                print(f"[CRAG] Web search warning for '{q}': {exc}")
+
+        print(f"[CRAG] web_search_fallback -> {len(results)} results")
         return {"web_results": results}
 
     # [Append Web Results to State]
@@ -166,7 +167,10 @@ Respond ONLY in valid JSON:
             f"[Web:{w['id']} | {w['title']} ({w['url']})]\n{w['snippet']}"
             for w in state.get("web_results", [])
         )
-        combined = f"--- PDF CONTEXT ---\n{doc_part or 'No strongly matching PDF sections.'}\n\n--- WEB CONTEXT ---\n{web_part}"
+        combined = (
+            f"--- PDF CONTEXT ---\n{doc_part or 'No strongly matching PDF sections.'}\n\n"
+            f"--- WEB CONTEXT ---\n{web_part or 'No external web results retrieved.'}"
+        )
         return {"draft_context": combined}
 
     # [Final Generation]
@@ -200,7 +204,6 @@ Respond ONLY in valid JSON:
         answer = data.get("answer") or str(resp.content)
         cited_ids = set(data.get("cited_chunk_ids", []))
 
-        # Fallback: extract [Doc:c_X] tags from answer text if JSON omitted cited_chunk_ids
         if not cited_ids:
             cited_ids = set(re.findall(r"\[Doc:(c_\d+)\]", answer))
 
@@ -216,6 +219,13 @@ Respond ONLY in valid JSON:
             if c["chunk_id"] in cited_ids
         ]
 
+        # Replace internal IDs with clean human-readable citations
+        for c in state["retrieved_chunks"]:
+            answer = answer.replace(f"[Doc:{c['chunk_id']}]", f"[p.{c['page_number']}]")
+        for w in state.get("web_results", []):
+            answer = answer.replace(f"[Web:{w['id']}]", f"[{w['id'].replace('_', ' ').title()}]")
+
+        print(f"[CRAG] final_generation -> {len(citations)} citations")
         return {"final_answer": answer, "citations": citations}
 
     builder = StateGraph(CRAGState)
