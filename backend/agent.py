@@ -17,7 +17,8 @@ def get_llm() -> ChatOpenAI:
         base_url=os.getenv("ZAI_BASE_URL", "https://api.z.ai/api/paas/v4"),
         temperature=0.1,
         max_tokens=1500,
-        timeout=45,
+        timeout=35,
+        max_retries=3,
         extra_body={"thinking": {"type": "disabled"}},
     )
 
@@ -52,7 +53,7 @@ def build_crag_graph(store: LightVectorStore):
 
     # [1. Retrieve Node]
     def retrieve_node(state: CRAGState) -> dict[str, Any]:
-        hits = store.similarity_search(state["query"], top_k=8)
+        hits = store.similarity_search(state["query"], top_k=6)
         formatted = [
             {
                 "chunk_id": chunk.chunk_id,
@@ -70,7 +71,7 @@ def build_crag_graph(store: LightVectorStore):
     # [2. Grade Node]
     def grade_node(state: CRAGState) -> dict[str, Any]:
         chunks_text = "\n\n".join(
-            f"ID: {c['chunk_id']} | Section: {c['section_title']} (Page {c['page_number']})\n{c['text']}"
+            f"ID: {c['chunk_id']} | Section: {c['section_title']} (Page {c['page_number']})\n{c['text'][:900]}"
             for c in state["retrieved_chunks"]
         )
         history_text = "\n".join(
