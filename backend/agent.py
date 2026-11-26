@@ -11,15 +11,18 @@ from vector_store import LightVectorStore
 
 
 def get_llm() -> ChatOpenAI:
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY environment variable is not set.")
+
     return ChatOpenAI(
-        model=os.getenv("GLM_MODEL", "glm-4.7-flash"),
-        api_key=os.getenv("ZAI_API_KEY"),
-        base_url=os.getenv("ZAI_BASE_URL", "https://api.z.ai/api/paas/v4"),
+        model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"),
+        api_key=api_key,
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         temperature=0.1,
         max_tokens=1500,
         timeout=35,
-        max_retries=3,
-        extra_body={"thinking": {"type": "disabled"}},
+        max_retries=2,
     )
 
 
